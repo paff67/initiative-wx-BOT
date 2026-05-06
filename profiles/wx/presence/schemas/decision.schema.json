@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["action", "message_class", "confidence"],
+  "properties": {
+    "action": {"enum": ["silent", "hesitate", "send", "act"]},
+    "message_class": {"type": "string"},
+    "confidence": {"type": "number"},
+    "voice_design": {
+      "type": "object",
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "model": {"type": "string"},
+        "natural_language_control": {"type": "string"},
+        "prompt": {"type": "string"},
+        "assistant_style_tags": {"type": "array", "items": {"type": "string"}},
+        "audio_tags": {"type": "array", "items": {"type": "string"}},
+        "audio_format": {"enum": ["wav", "pcm16"]},
+        "delivery_mode": {"enum": ["text_only", "voice_note_candidate", "voice_note_preferred"]},
+        "reason": {"type": "string"}
+      }
+    }
+  }
+}

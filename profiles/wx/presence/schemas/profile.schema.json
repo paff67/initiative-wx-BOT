@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["profile_id", "display_name", "channel", "timezone"],
+  "properties": {
+    "profile_id": {"type": "string"},
+    "display_name": {"type": "string"},
+    "channel": {"type": "string"},
+    "timezone": {"type": "string"}
+  }
+}

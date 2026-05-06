@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Presence Sanitized Conversation Ledger Event",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "event_id",
+    "profile_id",
+    "conversation_key",
+    "session_epoch_id",
+    "role",
+    "source",
+    "content",
+    "visible_to_user",
+    "created_at",
+    "unix_ts",
+    "sanitized"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "event_id": {"type": "string"},
+    "profile_id": {"type": "string"},
+    "channel": {"type": "string"},
+    "chat_id": {"type": "string"},
+    "thread_id": {"type": "string"},
+    "user_id": {"type": "string"},
+    "session_id": {"type": "string"},
+    "conversation_key": {"type": "string"},
+    "session_epoch_id": {"type": "string"},
+    "persona_revision": {"type": "string"},
+    "preset_id": {"type": "string"},
+    "role": {"enum": ["user", "assistant"]},
+    "source": {"type": "string"},
+    "content": {"type": "string"},
+    "content_kind": {"enum": ["text", "audio_attachment", "file_attachment"]},
+    "visible_to_user": {"type": "boolean"},
+    "created_at": {"type": "string"},
+    "unix_ts": {"type": "number"},
+    "sanitized": {"type": "boolean"},
+    "prompt_visibility": {
+      "type": "object",
+      "properties": {
+        "chat_history": {"type": "boolean"},
+        "state_context": {"type": "boolean"}
+      }
+    },
+    "presence": {"type": "object"},
+    "delivery": {"type": "object"}
+  }
+}

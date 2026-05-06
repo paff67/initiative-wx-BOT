@@ -1,0 +1,37 @@
+.env
+*.env
+!*.env.example
+.skills_prompt_snapshot.json
+auth.json
+auth.lock
+gateway.lock
+gateway.pid
+gateway_state.json
+gateway_voice_mode.json
+kanban.db
+state.db*
+*.log
+*.bak*
+*.pid
+*.lock
+
+# Runtime data and private conversation material.
+conversation/ledger.jsonl
+conversation/indexes/
+cron/output/
+logs/
+sessions*/
+memories/
+hindsight/
+hindsight.bak-*/
+/backups/
+cache/
+
+# Presence runtime streams are intentionally represented by .gitkeep only.
+presence/events/*
+!presence/events/.gitkeep
+presence/runtime/*
+!presence/runtime/.gitkeep
+presence/backups/*
+!presence/backups/.gitkeep
+presence/kernel/__pycache__/

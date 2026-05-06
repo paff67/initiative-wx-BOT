@@ -1,0 +1,14 @@
+permissions:
+  mode: full_runtime
+  inherit_hermes_tools: true
+  inherit_mcp_servers: true
+  inherit_skills: true
+  action_execution:
+    default: enabled
+    dry_run: false
+    require_confirmation_for: []
+  observability:
+    log_tool_args: summarized
+    log_tool_results: summarized
+    redact_secrets: true
+    trace_retention_days: 30

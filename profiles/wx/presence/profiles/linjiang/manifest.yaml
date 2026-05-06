@@ -1,0 +1,27 @@
+profile_id: linjiang
+display_name: 林绛
+version: 1
+channel: weixin
+locale: zh-CN
+timezone: Asia/Shanghai
+persona_files:
+  soul: ../../../SOUL.md
+  voice: voice.md
+  relationship: relationship.yaml
+  proactive_policy: proactive_policy.yaml
+  world_policy: world_policy.yaml
+  permission_policy: permission_policy.yaml
+  delivery: delivery_weixin.yaml
+memory_bindings:
+  user: ../../../USER.md
+  memory: ../../../MEMORY.md
+  session_db: ../../../state.db
+llm:
+  env_file: ../../../linjiang-llm.env
+  layers:
+    state:
+      env_prefix: WX_LINJIANG_STATE
+    decision:
+      env_prefix: WX_PROACTIVE_DECISION
+    render:
+      env_prefix: WX_PROACTIVE_DECISION

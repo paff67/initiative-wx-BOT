@@ -1,0 +1,33 @@
+channel: weixin
+wrap_response: false
+max_text_chars: 80
+supports:
+  text: true
+  media: true
+  typing: adapter_dependent
+  native_sticker: adapter_dependent
+  nudge: adapter_dependent
+fallbacks:
+  unsupported_action: silent
+speech:
+  enabled: true
+  provider: openai
+  model: mimo-v2.5-tts-voicedesign
+  base_url: http://127.0.0.1:8787/v1
+  response_format: mp3
+  proxy_mode: openai_audio_speech
+  voice_design:
+    strategy: decision_llm_dynamic
+    style_reference: 年轻女性中文声线，音色清冷、干净、轻微疲惫但温柔。语速偏慢，停顿自然，句尾轻轻落下，不夸张表演，不客服腔。
+    message_class_references:
+      micro_send: 年轻女性中文声线，清冷低声，刚睡醒或低能量的短促碎片感。语速慢，气息轻，句尾自然落下，不卖萌。
+      closure: 年轻女性中文声线，克制、温软、低压，像隔了一会儿后很轻地收一句。停顿自然，不要求回应。
+      random_share: 年轻女性中文声线，冷淡里带一点生活感和干燥幽默。语速中慢，声音干净，不广播腔。
+  audio_tag_policy:
+    max_tags_per_message: 2
+    allowed:
+      - 轻声
+      - 疲惫
+      - 叹气
+      - 停顿
+      - 低声

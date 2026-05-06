@@ -1,0 +1,153 @@
+collection:
+  default_enabled: true
+  prefilter_phase_must_be_non_llm: true
+signals:
+  time_context:
+    enabled: true
+command_sources: []
+mcp_sources:
+  - name: mcp_time_shanghai
+    enabled: true
+    phase: prefilter
+    server: time
+    tool: get_current_time
+    arguments:
+      timezone: Asia/Shanghai
+    kind: time
+    sensitivity: public
+    policy_decision: auto_allow
+    allowed_use: mood_only
+    confidence: 1.0
+    cache_ttl_minutes: 10
+    signal_ttl_minutes: 15
+    timeout_seconds: 20
+    max_result_chars: 800
+  - name: shanghai_current_weather
+    enabled: true
+    phase: prefilter
+    server: weather_openmeteo
+    tool: get_current_weather
+    arguments:
+      location: Shanghai
+      country_code: CN
+      units: metric
+    kind: weather
+    sensitivity: public
+    policy_decision: auto_allow
+    allowed_use: mood_and_share
+    confidence: 0.85
+    cache_ttl_minutes: 45
+    signal_ttl_minutes: 90
+    timeout_seconds: 45
+    max_result_chars: 1400
+  - name: shanghai_hourly_weather
+    enabled: true
+    phase: post_prefilter
+    server: weather_openmeteo
+    tool: get_hourly_forecast
+    arguments:
+      location: Shanghai
+      country_code: CN
+      units: metric
+    kind: weather_hourly
+    sensitivity: public
+    policy_decision: auto_allow
+    allowed_use: mood_and_share
+    confidence: 0.82
+    cache_ttl_minutes: 90
+    signal_ttl_minutes: 150
+    timeout_seconds: 60
+    max_result_chars: 1800
+  - name: shanghai_public_places
+    enabled: true
+    phase: prefilter
+    server: google_maps
+    tool: maps_search_places
+    arguments:
+      query: bookstores cafes parks in Shanghai
+      location:
+        latitude: 31.2304
+        longitude: 121.4737
+      radius: 5000
+    kind: public_places
+    sensitivity: public
+    policy_decision: auto_allow
+    allowed_use: mood_and_share
+    confidence: 0.72
+    cache_ttl_minutes: 240
+    signal_ttl_minutes: 360
+    timeout_seconds: 60
+    max_result_chars: 1600
+  - name: public_headlines_rss
+    enabled: true
+    phase: post_prefilter
+    server: rss_reader
+    tool: get_feed_headlines
+    arguments:
+      url: https://www.zaobao.com.sg/realtime/china/rss.xml
+      format: json
+    kind: public_rss
+    sensitivity: public
+    policy_decision: auto_allow
+    allowed_use: mood_and_share
+    confidence: 0.7
+    cache_ttl_minutes: 60
+    signal_ttl_minutes: 120
+    timeout_seconds: 60
+    max_result_chars: 1800
+  - name: public_web_fetch_seed
+    enabled: true
+    phase: post_prefilter
+    server: fetch
+    tool: fetch
+    arguments:
+      url: https://www.gov.cn/xinwen/yaowen.htm
+      max_length: 2500
+      raw: false
+    kind: public_web
+    sensitivity: public
+    policy_decision: auto_allow
+    allowed_use: mood_and_share
+    confidence: 0.62
+    cache_ttl_minutes: 180
+    signal_ttl_minutes: 240
+    timeout_seconds: 60
+    max_result_chars: 1800
+  - name: presence_runtime_state_audit
+    enabled: true
+    phase: post_prefilter
+    server: filesystem_presence
+    tool: read_text_file
+    arguments:
+      path: /home/hermes/.hermes/profiles/wx/presence/runtime/state.json
+      tail: 80
+    kind: local_presence_audit
+    sensitivity: personal_readonly
+    policy_decision: internal_only
+    allowed_use: state_only
+    confidence: 0.8
+    cache_ttl_minutes: 15
+    signal_ttl_minutes: 30
+    timeout_seconds: 30
+    max_result_chars: 1800
+  - name: public_browser_snapshot_seed
+    enabled: true
+    phase: post_prefilter
+    server: playwright_browser
+    tool: browser_navigate
+    arguments:
+      url: https://www.gov.cn/
+    kind: public_browser
+    sensitivity: public
+    policy_decision: auto_allow
+    allowed_use: mood_and_share
+    confidence: 0.55
+    cache_ttl_minutes: 240
+    signal_ttl_minutes: 300
+    timeout_seconds: 90
+    max_result_chars: 1800
+expression_policy:
+  public_read_only: may_share_obliquely
+  personal_read_only: mood_only
+  user_adjacent: timing_only
+  actionful: policy_controlled

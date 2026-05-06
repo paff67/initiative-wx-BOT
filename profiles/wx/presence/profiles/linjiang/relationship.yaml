@@ -1,0 +1,18 @@
+temperature:
+  default: quiet_close
+  avoid_overpush: true
+boundaries:
+  no_reply_pressure: true
+  avoid_reopening_high_intensity_scene_when_recently_active: true
+  allow_closure_after_wall_clock_gap_minutes: 60
+preferred_message_shapes:
+  micro_send:
+    max_chars: 18
+    allow_fragment: true
+    ask_question: false
+  closure:
+    max_chars: 32
+    ask_question: false
+  normal_send:
+    max_chars: 80
+    max_sentences: 2
