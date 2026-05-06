@@ -637,7 +637,7 @@ def rollback_decision_prompt(req: PromptRollbackRequest, token: str = Depends(re
 
 PROFILE_CONFIG_KINDS = {
     "manifest": "manifest.yaml",
-    "persona": "persona.yaml",
+    "profile_metadata": "profile_metadata.yaml",
     "relationship": "relationship.yaml",
     "proactive_policy": "proactive_policy.yaml",
     "world_policy": "world_policy.yaml",

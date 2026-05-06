@@ -11,6 +11,17 @@ import PresenceDecisions from './pages/PresenceDecisions';
 import Delivery from './pages/Delivery';
 import ProxyMonitor from './pages/ProxyMonitor';
 
+const navItems = [
+  { id: 'overview', label: '总览', hint: '运行状态', icon: LayoutDashboard },
+  { id: 'profiles', label: '配置', hint: '编辑与回滚', icon: Settings },
+  { id: 'preview', label: '预览', hint: 'dry-run', icon: Eye },
+  { id: 'traces', label: '链路', hint: '全流程', icon: Activity },
+  { id: 'world', label: '世界信号', hint: 'MCP 与来源', icon: Globe2 },
+  { id: 'decisions', label: '决策', hint: '动作裁决', icon: MessageSquare },
+  { id: 'delivery', label: '投递', hint: '微信输出', icon: Send },
+  { id: 'proxy', label: '代理', hint: '网关请求', icon: Radio },
+];
+
 function App() {
   const [activeTab, setActiveTab] = useState('overview');
   const [profileId, setProfileId] = useState('');
@@ -18,61 +29,58 @@ function App() {
   const profileList = profiles?.profiles || [];
   const selectedProfileId = profileId || profileList[0]?.profile_id || '';
 
-  const navItems = [
-    { id: 'overview', label: 'Overview', icon: LayoutDashboard },
-    { id: 'profiles', label: 'Profiles', icon: Settings },
-    { id: 'preview', label: 'Preview', icon: Eye },
-    { id: 'traces', label: 'Traces', icon: Activity },
-    { id: 'world', label: 'World Signals', icon: Globe2 },
-    { id: 'decisions', label: 'Decisions', icon: MessageSquare },
-    { id: 'delivery', label: 'Delivery', icon: Send },
-    { id: 'proxy', label: 'Proxy', icon: Radio },
-  ];
-
   return (
-    <div className="flex h-screen overflow-hidden bg-[var(--color-dark-bg)]">
-      <aside className="w-64 glass-panel border-r border-[rgba(255,255,255,0.05)] flex flex-col z-10">
-        <div className="p-6 flex items-center gap-3 border-b border-[rgba(255,255,255,0.05)]">
-          <div className="w-10 h-10 rounded-lg bg-blue-600 flex items-center justify-center shadow-lg shadow-blue-500/20">
-            <Bot className="w-6 h-6 text-white" />
+    <div className="app-shell">
+      <aside className="sidebar">
+        <div className="brand-block">
+          <div className="brand-mark">
+            <Bot size={21} />
           </div>
           <div>
-            <h1 className="font-bold text-lg tracking-tight text-white">Presence Kernel</h1>
-            <p className="text-xs text-[var(--color-text-secondary)] font-medium tracking-wider uppercase">Observer Console</p>
+            <h1 className="brand-title">Presence Observer</h1>
+            <p className="brand-subtitle">主动心跳控制台</p>
           </div>
         </div>
-        <div className="px-4 py-3 border-b border-[rgba(255,255,255,0.05)]">
-          <select
-            className="w-full bg-black/40 border border-white/10 rounded-lg px-3 py-2 text-sm text-white"
-            value={selectedProfileId}
-            onChange={(event) => setProfileId(event.target.value)}
-          >
-            {profileList.map((profile: any) => (
-              <option key={profile.profile_id} value={profile.profile_id}>{profile.display_name || profile.profile_id}</option>
-            ))}
-          </select>
-        </div>
-        <nav className="flex-1 p-4 space-y-2 overflow-y-auto">
+
+        <select
+          className="profile-select"
+          value={selectedProfileId}
+          aria-label="选择 profile"
+          onChange={(event) => setProfileId(event.target.value)}
+        >
+          {profileList.length === 0 && <option value="">暂无 profile</option>}
+          {profileList.map((profile: any) => (
+            <option key={profile.profile_id} value={profile.profile_id}>
+              {profile.display_name || profile.profile_id}
+            </option>
+          ))}
+        </select>
+
+        <nav className="nav-list" aria-label="Observer 导航">
           {navItems.map((item) => {
             const Icon = item.icon;
             const isActive = activeTab === item.id;
             return (
               <button
                 key={item.id}
+                type="button"
                 onClick={() => setActiveTab(item.id)}
-                className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg transition-all ${
-                  isActive ? 'bg-white/10 text-white font-medium' : 'text-[var(--color-text-secondary)] hover:bg-white/5 hover:text-white'
-                }`}
+                className={`nav-button ${isActive ? 'is-active' : ''}`}
+                aria-current={isActive ? 'page' : undefined}
               >
-                <Icon className={`w-5 h-5 ${isActive ? 'text-blue-400' : ''}`} />
-                <span className="truncate">{item.label}</span>
+                <Icon size={18} />
+                <span>
+                  <span className="block font-semibold">{item.label}</span>
+                  <span className="block text-xs opacity-75">{item.hint}</span>
+                </span>
               </button>
             );
           })}
         </nav>
       </aside>
-      <main className="flex-1 overflow-y-auto relative">
-        <div className="p-8 relative z-0 min-h-full">
+
+      <main className="main-pane">
+        <div className="content-frame">
           {activeTab === 'overview' && <PresenceOverview profileId={selectedProfileId} />}
           {activeTab === 'profiles' && <Profiles profileId={selectedProfileId} onProfileChange={setProfileId} />}
           {activeTab === 'preview' && <Preview profileId={selectedProfileId} />}
