@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 
@@ -35,6 +35,8 @@ if FRONTEND_DIST.is_dir() and _index_html.exists():
     # SPA catch-all: any non-API route returns index.html for client-side routing.
     @app.get("/{full_path:path}")
     async def spa_fallback(full_path: str):
+        if full_path.startswith("api/"):
+            raise HTTPException(status_code=404, detail=f"API route not found: /{full_path}")
         # Check if requested file exists in dist (e.g. favicon.ico, robots.txt).
         candidate = FRONTEND_DIST / full_path
         if full_path and candidate.is_file():

@@ -1,14 +1,18 @@
 """API routers for Linjiang Observer."""
 from __future__ import annotations
 
+import json
 import os
 import time
 from datetime import datetime, timezone, timedelta
 import hashlib
 import subprocess
+import threading
 from typing import Any, Optional, List
+from uuid import uuid4
 
 from fastapi import APIRouter, Query, Header, HTTPException, Request, Body, Depends
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from ..config import (
@@ -23,6 +27,10 @@ from ..config import (
 )
 from ..readers.jsonl_tail import tail_jsonl, read_json_file
 import fcntl
+
+PREVIEW_JOBS_DIR = PRESENCE_RUNTIME_DIR / "preview-jobs"
+PREVIEW_SUBPROCESS_PATH_PREFIX = "/home/hermes/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin"
+PREVIEW_JOB_LOCK = threading.Lock()
 
 def require_token():
     # Token check removed; authentication is handled by Cloudflare Access
@@ -457,6 +465,10 @@ class PreviewRequest(BaseModel):
     force_llm: bool = True
 
 
+class PreviewJobRequest(PreviewRequest):
+    sync: bool = False
+
+
 class WorldSignalReviewRequest(BaseModel):
     action: str
     reason: Optional[str] = None
@@ -652,6 +664,124 @@ def _safe_profile_id(profile_id: str) -> str:
     if not profile_id or "/" in profile_id or "\\" in profile_id or profile_id.startswith("."):
         raise HTTPException(status_code=400, detail="Invalid profile_id")
     return profile_id
+
+
+def _preview_job_path(job_id: str):
+    if not job_id or any(ch not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-" for ch in job_id):
+        raise HTTPException(status_code=400, detail="Invalid preview job id")
+    return PREVIEW_JOBS_DIR / f"{job_id}.json"
+
+
+def _write_preview_job(job: dict[str, Any]) -> None:
+    PREVIEW_JOBS_DIR.mkdir(parents=True, exist_ok=True)
+    path = _preview_job_path(str(job["job_id"]))
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(job, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(path)
+
+
+def _read_preview_job(job_id: str) -> dict[str, Any] | None:
+    path = _preview_job_path(job_id)
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except Exception:
+        return None
+
+
+def _preview_subprocess_env() -> dict[str, str]:
+    env = os.environ.copy()
+    existing_path = env.get("PATH", "")
+    parts = [p for p in (PREVIEW_SUBPROCESS_PATH_PREFIX + ":" + existing_path).split(":") if p]
+    deduped: list[str] = []
+    for part in parts:
+        if part not in deduped:
+            deduped.append(part)
+    env["PATH"] = ":".join(deduped)
+    env.setdefault("HOME", "/home/hermes")
+    env.setdefault("HERMES_HOME", str(HERMES_HOME))
+    return env
+
+
+def _run_preview_job(job_id: str, request_data: dict[str, Any]) -> None:
+    started = datetime.now(timezone.utc)
+    job = _read_preview_job(job_id) or {"job_id": job_id, "request": request_data}
+    job.update({"status": "running", "started_at": started.isoformat(), "updated_at": started.isoformat()})
+    _write_preview_job(job)
+
+    script = PRESENCE_KERNEL_DIR / "presence_tick.py"
+    if not script.exists():
+        finished = datetime.now(timezone.utc)
+        job.update({
+            "status": "failed",
+            "ok": False,
+            "error": f"Presence preview script not found: {script}",
+            "finished_at": finished.isoformat(),
+            "updated_at": finished.isoformat(),
+            "duration_ms": round((finished - started).total_seconds() * 1000),
+        })
+        _write_preview_job(job)
+        return
+
+    profile_id = _safe_profile_id(str(request_data.get("profile_id") or "linjiang"))
+    cmd = ["python3", str(script), "--profile", profile_id, "--dry-run"]
+    if request_data.get("force_llm", True):
+        cmd.append("--force-llm")
+
+    try:
+        with PREVIEW_JOB_LOCK:
+            result = subprocess.run(
+                cmd,
+                cwd=str(PRESENCE_KERNEL_DIR),
+                capture_output=True,
+                text=True,
+                timeout=240,
+                env=_preview_subprocess_env(),
+            )
+        parsed = None
+        try:
+            parsed = json.loads(result.stdout.strip().splitlines()[-1]) if result.stdout.strip() else None
+        except Exception:
+            parsed = None
+        finished = datetime.now(timezone.utc)
+        job.update({
+            "status": "completed" if result.returncode == 0 else "failed",
+            "ok": result.returncode == 0,
+            "exit_code": result.returncode,
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+            "result": parsed,
+            "trace": read_json_file(PRESENCE_RUNTIME_DIR / "preview-last-trace.json"),
+            "finished_at": finished.isoformat(),
+            "updated_at": finished.isoformat(),
+            "duration_ms": round((finished - started).total_seconds() * 1000),
+        })
+    except subprocess.TimeoutExpired as exc:
+        finished = datetime.now(timezone.utc)
+        job.update({
+            "status": "timed_out",
+            "ok": False,
+            "exit_code": None,
+            "stdout": exc.stdout or "",
+            "stderr": exc.stderr or "",
+            "error": "Preview timed out",
+            "trace": read_json_file(PRESENCE_RUNTIME_DIR / "preview-last-trace.json"),
+            "finished_at": finished.isoformat(),
+            "updated_at": finished.isoformat(),
+            "duration_ms": round((finished - started).total_seconds() * 1000),
+        })
+    except Exception as exc:
+        finished = datetime.now(timezone.utc)
+        job.update({
+            "status": "failed",
+            "ok": False,
+            "error": str(exc)[:800],
+            "finished_at": finished.isoformat(),
+            "updated_at": finished.isoformat(),
+            "duration_ms": round((finished - started).total_seconds() * 1000),
+        })
+    _write_preview_job(job)
 
 
 def _profile_dir(profile_id: str):
@@ -926,46 +1056,65 @@ def conversation_latest():
     return {"latest_by_chat": latest_by_chat, "latest_presence_by_chat": latest_presence}
 
 
+@router.get("/preview/full")
+def presence_preview_full_get():
+    raise HTTPException(status_code=405, detail="Use POST /api/preview/full with a JSON request body")
+
+
 @router.post("/preview/full")
-def presence_preview_full(req: PreviewRequest):
-    script = PRESENCE_KERNEL_DIR / "presence_tick.py"
-    if not script.exists():
-        raise HTTPException(status_code=500, detail=f"Presence preview script not found: {script}")
-    cmd = ["python3", str(script), "--profile", req.profile_id, "--dry-run"]
-    if req.force_llm:
-        cmd.append("--force-llm")
-    try:
-        result = subprocess.run(cmd, cwd=str(PRESENCE_KERNEL_DIR), capture_output=True, text=True, timeout=240)
-        parsed = None
-        try:
-            import json
-            parsed = json.loads(result.stdout.strip().splitlines()[-1]) if result.stdout.strip() else None
-        except Exception:
-            parsed = None
-        return {
-            "ok": result.returncode == 0,
-            "exit_code": result.returncode,
-            "stdout": result.stdout,
-            "stderr": result.stderr,
-            "result": parsed,
-            "trace": read_json_file(PRESENCE_RUNTIME_DIR / "preview-last-trace.json"),
+def presence_preview_full(req: PreviewJobRequest):
+    _safe_profile_id(req.profile_id)
+    request_data = req.model_dump() if hasattr(req, "model_dump") else req.dict()
+    if request_data.get("sync"):
+        job_id = f"preview_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{uuid4().hex[:8]}"
+        job = {
+            "job_id": job_id,
+            "status": "queued",
+            "profile_id": req.profile_id,
+            "request": request_data,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
         }
-    except subprocess.TimeoutExpired:
-        raise HTTPException(status_code=504, detail="Preview timed out")
+        _write_preview_job(job)
+        _run_preview_job(job_id, request_data)
+        return _read_preview_job(job_id) or job
+
+    job_id = f"preview_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{uuid4().hex[:8]}"
+    job = {
+        "job_id": job_id,
+        "status": "queued",
+        "profile_id": req.profile_id,
+        "request": request_data,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "poll_url": f"/api/preview/jobs/{job_id}",
+    }
+    _write_preview_job(job)
+    thread = threading.Thread(target=_run_preview_job, args=(job_id, request_data), name=f"preview-{job_id}", daemon=True)
+    thread.start()
+    return JSONResponse(status_code=202, content=job)
+
+
+@router.get("/preview/jobs/{job_id}")
+def presence_preview_job(job_id: str):
+    job = _read_preview_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Preview job not found")
+    return job
 
 
 @router.post("/preview/state")
-def presence_preview_state(req: PreviewRequest):
+def presence_preview_state(req: PreviewJobRequest):
     return presence_preview_full(req)
 
 
 @router.post("/preview/decision")
-def presence_preview_decision(req: PreviewRequest):
+def presence_preview_decision(req: PreviewJobRequest):
     return presence_preview_full(req)
 
 
 @router.post("/preview/render")
-def presence_preview_render(req: PreviewRequest):
+def presence_preview_render(req: PreviewJobRequest):
     return presence_preview_full(req)
 
 
