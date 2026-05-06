@@ -142,6 +142,27 @@ class ImageGenProvider(abc.ABC):
         should ignore unknown keys.
         """
 
+    def edit(
+        self,
+        *,
+        prompt: str,
+        source_image: str,
+        aspect_ratio: str = DEFAULT_ASPECT_RATIO,
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        """Edit an existing image when the provider supports image input.
+
+        The default implementation lets older providers keep working while
+        newer image backends can opt into image-to-image/edit workflows.
+        """
+        return error_response(
+            error=f"Provider '{self.name}' does not support image edits",
+            error_type="unsupported_operation",
+            provider=self.name,
+            prompt=prompt,
+            aspect_ratio=resolve_aspect_ratio(aspect_ratio),
+        )
+
 
 # ---------------------------------------------------------------------------
 # Helpers

@@ -807,7 +807,12 @@ def _generate_elevenlabs(text: str, output_path: str, tts_config: Dict[str, Any]
 # ===========================================================================
 # Provider: OpenAI TTS
 # ===========================================================================
-def _generate_openai_tts(text: str, output_path: str, tts_config: Dict[str, Any]) -> str:
+def _generate_openai_tts(
+    text: str,
+    output_path: str,
+    tts_config: Dict[str, Any],
+    voice_design: Optional[str] = None,
+) -> str:
     """
     Generate audio using OpenAI TTS.
 
@@ -827,6 +832,18 @@ def _generate_openai_tts(text: str, output_path: str, tts_config: Dict[str, Any]
     base_url = oai_config.get("base_url", base_url)
     speed = float(oai_config.get("speed", tts_config.get("speed", 1.0)))
 
+    if _is_mimo_chat_tts_model(str(model)) and bool(oai_config.get("direct_chat_completions", False)):
+        return _generate_mimo_chat_tts(
+            text=text,
+            output_path=output_path,
+            api_key=api_key,
+            base_url=base_url,
+            model=str(model),
+            voice=str(voice) if voice else "",
+            oai_config=oai_config,
+            voice_design=voice_design,
+        )
+
     # Determine response format from extension
     if output_path.endswith(".ogg"):
         response_format = "opus"
@@ -843,12 +860,123 @@ def _generate_openai_tts(text: str, output_path: str, tts_config: Dict[str, Any]
             response_format=response_format,
             extra_headers={"x-idempotency-key": str(uuid.uuid4())},
         )
+        prompt = _resolve_mimo_voice_design(oai_config, voice_design)
+        if prompt:
+            create_kwargs["instructions"] = prompt
+            create_kwargs["extra_body"] = {"voice_design": prompt}
         if speed != 1.0:
             create_kwargs["speed"] = max(0.25, min(4.0, speed))
         response = client.audio.speech.create(**create_kwargs)
 
         response.stream_to_file(output_path)
         return output_path
+    finally:
+        close = getattr(client, "close", None)
+        if callable(close):
+            close()
+
+
+def _is_mimo_chat_tts_model(model: str) -> bool:
+    return model.strip().lower().startswith("mimo-v2.5-tts")
+
+
+def _resolve_mimo_voice_design(oai_config: Dict[str, Any], voice_design: Optional[str]) -> str:
+    if voice_design and voice_design.strip():
+        return voice_design.strip()
+    cfg = oai_config.get("voice_design")
+    if isinstance(cfg, str):
+        return cfg.strip()
+    if isinstance(cfg, dict):
+        return str(cfg.get("prompt") or cfg.get("description") or "").strip()
+    return str(oai_config.get("style_prompt") or "").strip()
+
+
+def _mimo_api_audio_format(oai_config: Dict[str, Any]) -> str:
+    fmt = str(oai_config.get("response_format") or oai_config.get("audio_format") or "wav").strip().lower()
+    return fmt if fmt in {"wav", "pcm16"} else "wav"
+
+
+def _write_or_convert_audio(audio_bytes: bytes, api_format: str, output_path: str) -> str:
+    target = Path(output_path).expanduser()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if api_format == "pcm16":
+        source_bytes = _wrap_pcm_as_wav(audio_bytes)
+    else:
+        source_bytes = audio_bytes
+
+    if target.suffix.lower() == ".wav":
+        target.write_bytes(source_bytes)
+        return str(target)
+
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+        tmp.write(source_bytes)
+        tmp_path = tmp.name
+    try:
+        if not _has_ffmpeg():
+            fallback = target.with_suffix(".wav")
+            Path(tmp_path).replace(fallback)
+            return str(fallback)
+        result = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", tmp_path, str(target)],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if result.returncode != 0 or not target.exists() or target.stat().st_size <= 0:
+            raise RuntimeError((result.stderr or "ffmpeg produced no output").strip()[:300])
+        return str(target)
+    finally:
+        try:
+            Path(tmp_path).unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
+def _generate_mimo_chat_tts(
+    *,
+    text: str,
+    output_path: str,
+    api_key: str,
+    base_url: str,
+    model: str,
+    voice: str,
+    oai_config: Dict[str, Any],
+    voice_design: Optional[str] = None,
+) -> str:
+    prompt = _resolve_mimo_voice_design(oai_config, voice_design)
+    model_lower = model.lower()
+    if model_lower.endswith("-voicedesign") and not prompt:
+        raise ValueError("mimo-v2.5-tts-voicedesign requires tts.openai.voice_design.prompt or a voice_design tool argument")
+
+    messages = []
+    if prompt:
+        messages.append({"role": "user", "content": prompt})
+    messages.append({"role": "assistant", "content": text})
+
+    audio_format = _mimo_api_audio_format(oai_config)
+    audio: Dict[str, Any] = {"format": audio_format}
+    if model_lower == "mimo-v2.5-tts" and voice:
+        audio["voice"] = voice
+
+    OpenAIClient = _import_openai_client()
+    client = OpenAIClient(api_key=api_key, base_url=base_url)
+    try:
+        completion = client.chat.completions.create(
+            model=model,
+            messages=messages,
+            audio=audio,
+            extra_headers={"x-idempotency-key": str(uuid.uuid4())},
+        )
+        message = completion.choices[0].message
+        audio_obj = getattr(message, "audio", None)
+        if isinstance(audio_obj, dict):
+            audio_data = audio_obj.get("data")
+        else:
+            audio_data = getattr(audio_obj, "data", None)
+        if not audio_data:
+            raise RuntimeError("MiMo TTS response contained no audio data")
+        audio_bytes = base64.b64decode(audio_data)
+        return _write_or_convert_audio(audio_bytes, audio_format, output_path)
     finally:
         close = getattr(client, "close", None)
         if callable(close):
@@ -1533,6 +1661,7 @@ def _generate_kittentts(text: str, output_path: str, tts_config: Dict[str, Any])
 def text_to_speech_tool(
     text: str,
     output_path: Optional[str] = None,
+    voice_design: Optional[str] = None,
 ) -> str:
     """
     Convert text to speech audio.
@@ -1547,6 +1676,7 @@ def text_to_speech_tool(
     Args:
         text: The text to convert to speech.
         output_path: Optional custom save path. Defaults to ~/voice-memos/<timestamp>.mp3
+        voice_design: Optional MiMo VoiceDesign prompt. Used only by compatible TTS models.
 
     Returns:
         str: JSON result with success, file_path, and optionally MEDIA tag.
@@ -1639,7 +1769,7 @@ def text_to_speech_tool(
                     "error": "OpenAI provider selected but 'openai' package not installed."
                 }, ensure_ascii=False)
             logger.info("Generating speech with OpenAI TTS...")
-            _generate_openai_tts(text, file_str, tts_config)
+            file_str = _generate_openai_tts(text, file_str, tts_config, voice_design=voice_design)
 
         elif provider == "minimax":
             logger.info("Generating speech with MiniMax TTS...")
@@ -1763,6 +1893,11 @@ def text_to_speech_tool(
 
         # Build response with MEDIA tag for platform delivery
         media_tag = f"MEDIA:{file_str}"
+        # Allow built-in/provider-specific config to opt into platform voice delivery.
+        provider_voice_config = tts_config.get(provider)
+        if isinstance(provider_voice_config, dict) and _is_command_tts_voice_compatible(provider_voice_config):
+            voice_compatible = True
+
         if voice_compatible:
             media_tag = f"[[audio_as_voice]]\n{media_tag}"
 
@@ -1772,6 +1907,7 @@ def text_to_speech_tool(
             "media_tag": media_tag,
             "provider": provider,
             "voice_compatible": voice_compatible,
+            "voice_design_used": bool(voice_design),
         }, ensure_ascii=False)
 
     except ValueError as e:
@@ -2167,6 +2303,10 @@ TTS_SCHEMA = {
             "output_path": {
                 "type": "string",
                 "description": f"Optional custom file path to save the audio. Defaults to {display_hermes_home()}/audio_cache/<timestamp>.mp3"
+            },
+            "voice_design": {
+                "type": "string",
+                "description": "Optional MiMo VoiceDesign prompt for models such as mimo-v2.5-tts-voicedesign. Use 1-4 concise sentences describing age/gender/timbre/mood/rhythm; do not include the message text."
             }
         },
         "required": ["text"]
@@ -2179,7 +2319,8 @@ registry.register(
     schema=TTS_SCHEMA,
     handler=lambda args, **kw: text_to_speech_tool(
         text=args.get("text", ""),
-        output_path=args.get("output_path")),
+        output_path=args.get("output_path"),
+        voice_design=args.get("voice_design")),
     check_fn=check_tts_requirements,
     emoji="🔊",
 )

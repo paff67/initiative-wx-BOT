@@ -854,24 +854,43 @@ from tools.registry import registry, tool_error
 IMAGE_GENERATE_SCHEMA = {
     "name": "image_generate",
     "description": (
-        "Generate high-quality images from text prompts. The underlying "
+        "Generate high-quality images from text prompts, or edit an existing "
+        "image when `source_image` is provided. The underlying "
         "backend (FAL, OpenAI, etc.) and model are user-configured and not "
         "selectable by the agent. Returns either a URL or an absolute file "
         "path in the `image` field; display it with markdown "
-        "![description](url-or-path) and the gateway will deliver it."
+        "![description](url-or-path) and the gateway will deliver it. Use this "
+        "tool whenever the user asks for a picture, image, photo, selfie, "
+        "portrait, poster, logo, illustration, wallpaper, or phrasing such as "
+        "'give me one', 'draw one', 'make one', 'generate one', '来一张', "
+        "'给我一张', '画一张', '生成一张', '做一张', even when they do not "
+        "explicitly say 'use the image tool'."
     ),
     "parameters": {
         "type": "object",
         "properties": {
             "prompt": {
                 "type": "string",
-                "description": "The text prompt describing the desired image. Be detailed and descriptive.",
+                "description": (
+                    "The text prompt describing the desired image. Preserve the "
+                    "user's visual intent and add concise visual details when "
+                    "helpful: subject, style, composition, mood, lighting, "
+                    "camera/framing, colors, and important constraints."
+                ),
             },
             "aspect_ratio": {
                 "type": "string",
                 "enum": list(VALID_ASPECT_RATIOS),
                 "description": "The aspect ratio of the generated image. 'landscape' is 16:9 wide, 'portrait' is 16:9 tall, 'square' is 1:1.",
                 "default": DEFAULT_ASPECT_RATIO,
+            },
+            "source_image": {
+                "type": "string",
+                "description": (
+                    "Optional local image path or file:// URL to edit. Use this "
+                    "when the user asks to modify an uploaded image or a previous "
+                    "generated image. Leave empty for text-to-image generation."
+                ),
             },
         },
         "required": ["prompt"],
@@ -900,7 +919,7 @@ def _read_configured_image_provider():
     return None
 
 
-def _dispatch_to_plugin_provider(prompt: str, aspect_ratio: str):
+def _dispatch_to_plugin_provider(prompt: str, aspect_ratio: str, source_image: Optional[str] = None):
     """Route the call to a plugin-registered provider when one is selected.
 
     Returns a JSON string on dispatch, or ``None`` to fall through to the
@@ -950,7 +969,23 @@ def _dispatch_to_plugin_provider(prompt: str, aspect_ratio: str):
         })
 
     try:
-        result = provider.generate(prompt=prompt, aspect_ratio=aspect_ratio)
+        if source_image:
+            edit_fn = getattr(provider, "edit", None)
+            if callable(edit_fn):
+                result = edit_fn(
+                    prompt=prompt,
+                    source_image=source_image,
+                    aspect_ratio=aspect_ratio,
+                )
+            else:
+                result = {
+                    "success": False,
+                    "image": None,
+                    "error": f"Provider '{getattr(provider, 'name', '?')}' does not support image edits",
+                    "error_type": "unsupported_operation",
+                }
+        else:
+            result = provider.generate(prompt=prompt, aspect_ratio=aspect_ratio)
     except Exception as exc:
         logger.warning(
             "Image gen provider '%s' raised: %s",
@@ -977,12 +1012,24 @@ def _handle_image_generate(args, **kw):
     if not prompt:
         return tool_error("prompt is required for image generation")
     aspect_ratio = args.get("aspect_ratio", DEFAULT_ASPECT_RATIO)
+    source_image = args.get("source_image") or ""
 
     # Route to a plugin-registered provider if one is active (and it's
     # not the in-tree FAL path).
-    dispatched = _dispatch_to_plugin_provider(prompt, aspect_ratio)
+    dispatched = _dispatch_to_plugin_provider(prompt, aspect_ratio, source_image=source_image)
     if dispatched is not None:
         return dispatched
+
+    if source_image:
+        return json.dumps({
+            "success": False,
+            "image": None,
+            "error": (
+                "Image editing requires an image generation provider that "
+                "supports source_image, such as image_gen.provider=openai."
+            ),
+            "error_type": "unsupported_operation",
+        })
 
     return image_generate_tool(
         prompt=prompt,

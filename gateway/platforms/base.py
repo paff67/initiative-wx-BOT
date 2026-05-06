@@ -2703,6 +2703,35 @@ class BasePlatformAdapter(ABC):
             if getattr(result, "success", False):
                 delivery_succeeded = True
 
+        def _write_ledger(content: str, *, content_kind: str = "text", message_id: Optional[str] = None) -> None:
+            if not content:
+                return
+            if event.get_command():
+                return
+            try:
+                session_id = ""
+                store = getattr(self, "_session_store", None)
+                if store is not None:
+                    try:
+                        entry = store.get_or_create_session(event.source)
+                        session_id = getattr(entry, "session_id", "") or ""
+                    except Exception:
+                        session_id = ""
+                from gateway.conversation_ledger import write_event_from_source
+
+                platform_name = _platform_name(getattr(self, "platform", ""))
+                write_event_from_source(
+                    source=event.source,
+                    session_id=session_id,
+                    role="assistant",
+                    source_label=f"{platform_name}_inbound_reply",
+                    content=content,
+                    content_kind=content_kind,
+                    message_id=message_id,
+                )
+            except Exception as exc:
+                logger.debug("[%s] Conversation ledger outbound write failed: %s", self.name, exc)
+
         # Reuse the interrupt event set by handle_message() (which marks
         # the session active before spawning this task to prevent races).
         # Fall back to a new Event only if the entry was removed externally.
@@ -2842,6 +2871,12 @@ class BasePlatformAdapter(ABC):
                         metadata=_thread_metadata,
                     )
                     _record_delivery(result)
+                    if result and getattr(result, "success", False):
+                        _write_ledger(
+                            text_content,
+                            content_kind="text",
+                            message_id=getattr(result, "message_id", None),
+                        )
 
                     # Schedule auto-deletion of system-notice replies.
                     # Detached so the handler returns immediately; errors
@@ -2935,6 +2970,12 @@ class BasePlatformAdapter(ABC):
 
                         if not media_result.success:
                             logger.warning("[%s] Failed to send media (%s): %s", self.name, ext, media_result.error)
+                        else:
+                            _write_ledger(
+                                f"[附件] {Path(media_path).name}",
+                                content_kind="audio_attachment" if ext in _AUDIO_EXTS else "file_attachment",
+                                message_id=getattr(media_result, "message_id", None),
+                            )
                     except Exception as media_err:
                         logger.warning("[%s] Error sending media: %s", self.name, media_err)
 
@@ -2945,16 +2986,22 @@ class BasePlatformAdapter(ABC):
                     try:
                         ext = Path(file_path).suffix.lower()
                         if ext in _VIDEO_EXTS:
-                            await self.send_video(
+                            file_result = await self.send_video(
                                 chat_id=event.source.chat_id,
                                 video_path=file_path,
                                 metadata=_thread_metadata,
                             )
                         else:
-                            await self.send_document(
+                            file_result = await self.send_document(
                                 chat_id=event.source.chat_id,
                                 file_path=file_path,
                                 metadata=_thread_metadata,
+                            )
+                        if file_result and getattr(file_result, "success", False):
+                            _write_ledger(
+                                f"[附件] {Path(file_path).name}",
+                                content_kind="file_attachment",
+                                message_id=getattr(file_result, "message_id", None),
                             )
                     except Exception as file_err:
                         logger.error("[%s] Error sending local file %s: %s", self.name, file_path, file_err)

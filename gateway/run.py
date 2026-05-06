@@ -94,6 +94,46 @@ def _telegramize_command_mentions(text: str, platform: Any) -> str:
 _AUTO_CONTINUE_FRESHNESS_SECS_DEFAULT = 60 * 60
 
 
+# --- Stale-code self-check ------------------------------------------------
+# Long-running gateway processes that survive an ``hermes update`` keep the
+# old ``hermes_cli.config`` (and friends) cached in ``sys.modules``.  When
+# the updated tool files on disk then try to ``from hermes_cli.config
+# import cfg_get`` (added in PR #17304), the import resolves against the
+# already-loaded stale module object and raises ``ImportError`` — see
+# Issue #17648.  Rather than papering over the import failure site-by-site
+# in every tool file, detect the stale state centrally and auto-restart
+# so the gateway reloads with fresh code.  The sentinel files below are
+# the canonical repo-level markers that every update touches; if any is
+# newer than the gateway's boot time, we know the running process is out
+# of date.
+_STALE_CODE_SENTINELS: tuple[str, ...] = (
+    "hermes_cli/config.py",
+    "hermes_cli/__init__.py",
+    "run_agent.py",
+    "gateway/run.py",
+    "pyproject.toml",
+)
+
+
+def _compute_repo_mtime(repo_root: Path) -> float:
+    """Return the newest mtime across the stale-code sentinel files.
+
+    Missing files are ignored (they may not exist on older checkouts).
+    Returns 0.0 if no sentinel file is readable — treat that as "can't
+    tell", which downstream callers interpret as "not stale" to avoid
+    false-positive restart loops.
+    """
+    newest = 0.0
+    for rel in _STALE_CODE_SENTINELS:
+        try:
+            st = (repo_root / rel).stat()
+        except (OSError, FileNotFoundError):
+            continue
+        if st.st_mtime > newest:
+            newest = st.st_mtime
+    return newest
+
+
 def _coerce_gateway_timestamp(value: Any) -> Optional[float]:
     """Best-effort conversion of stored gateway timestamps to epoch seconds.
 
@@ -1007,6 +1047,12 @@ class GatewayRunner:
     _stop_task: Optional[asyncio.Task] = None
     _session_model_overrides: Dict[str, Dict[str, str]] = {}
     _session_reasoning_overrides: Dict[str, Dict[str, Any]] = {}
+    # Stale-code self-check defaults (see _detect_stale_code()).  Class-level
+    # so tests that construct GatewayRunner via ``object.__new__`` without
+    # running __init__ don't crash when _handle_message reads these.
+    _boot_wall_time: float = 0.0
+    _boot_repo_mtime: float = 0.0
+    _stale_code_restart_triggered: bool = False
 
     def __init__(self, config: Optional[GatewayConfig] = None):
         global _gateway_runner_ref
@@ -1014,6 +1060,22 @@ class GatewayRunner:
         self.adapters: Dict[Platform, BasePlatformAdapter] = {}
         self._warn_if_docker_media_delivery_is_risky()
         _gateway_runner_ref = _weakref.ref(self)
+
+        # Boot-time snapshot used by the stale-code self-check.  Captured
+        # before any work happens so post-update file writes are guaranteed
+        # to have newer mtimes.  See _detect_stale_code() / Issue #17648.
+        try:
+            self._boot_wall_time: float = time.time()
+            self._repo_root_for_staleness: Path = Path(__file__).resolve().parent.parent
+            self._boot_repo_mtime: float = _compute_repo_mtime(
+                self._repo_root_for_staleness,
+            )
+        except Exception:
+            self._boot_wall_time = 0.0
+            self._repo_root_for_staleness = Path(".")
+            self._boot_repo_mtime = 0.0
+        self._stale_code_notified: set[str] = set()
+        self._stale_code_restart_triggered: bool = False
 
         # Load ephemeral config from config.yaml / env vars.
         # Both are injected at API-call time only and never persisted.
@@ -2721,6 +2783,63 @@ class GatewayRunner:
         self._background_tasks.add(task)
         task.add_done_callback(self._background_tasks.discard)
         return True
+
+    def _detect_stale_code(self) -> bool:
+        """Return True if source files on disk are newer than the running process.
+
+        A gateway that survives ``hermes update`` (manual SIGTERM never
+        escalated, systemd restart race, detached-process respawn failed,
+        etc.) keeps pre-update modules cached in ``sys.modules``.  Later
+        imports of names added post-update — e.g. ``cfg_get`` from PR
+        #17304 — raise ImportError against the stale module object (see
+        Issue #17648).  Detecting this at the source — "the code on disk
+        is newer than me" — lets us auto-restart instead of serving
+        broken responses until the user notices and runs
+        ``hermes gateway restart`` manually.
+
+        Returns False when the boot-time snapshot is unavailable or no
+        sentinel file is readable, to avoid false-positive restart loops
+        in unusual checkouts (sparse clones, read-only filesystems).
+        """
+        if not self._boot_wall_time or not self._boot_repo_mtime:
+            return False
+        try:
+            current = _compute_repo_mtime(self._repo_root_for_staleness)
+        except Exception:
+            return False
+        if current <= 0.0:
+            return False
+        # 2-second slack guards against filesystems with coarse mtime
+        # resolution (FAT32, some NFS mounts).  Real updates always move
+        # the newest-file mtime forward by minutes, so this doesn't hide
+        # genuine staleness.
+        return current > self._boot_repo_mtime + 2.0
+
+    def _trigger_stale_code_restart(self) -> None:
+        """Idempotently kick off a graceful restart after stale-code detection.
+
+        Runs at most once per process.  The restart request goes through
+        the normal drain path so in-flight agent turns finish before the
+        process exits; the service manager (systemd / launchd / detached
+        profile watcher) then respawns with fresh code.  On manual
+        ``hermes gateway run`` installs without a supervisor, the
+        process exits and the user must restart by hand — but they get a
+        user-visible message telling them so.
+        """
+        if self._stale_code_restart_triggered:
+            return
+        self._stale_code_restart_triggered = True
+        logger.warning(
+            "Stale-code self-check: source files newer than gateway boot "
+            "time (boot=%.0f, newest=%.0f) — requesting graceful restart. "
+            "See Issue #17648.",
+            self._boot_repo_mtime,
+            _compute_repo_mtime(self._repo_root_for_staleness),
+        )
+        try:
+            self.request_restart(detached=False, via_service=True)
+        except Exception as exc:
+            logger.error("Stale-code restart request failed: %s", exc)
 
     async def start(self) -> bool:
         """
@@ -4657,6 +4776,27 @@ class GatewayRunner:
         """
         source = event.source
 
+        # Stale-code self-check (Issue #17648).  A gateway that survives
+        # ``hermes update`` keeps old modules cached in sys.modules; the
+        # first inbound message is our earliest safe chance to detect
+        # this and restart gracefully before we dispatch to the agent
+        # and hit ImportError on freshly-added names (e.g. cfg_get).
+        # Idempotent — runs the real check at most once per message, and
+        # request_restart() no-ops after the first call.
+        try:
+            if self._detect_stale_code():
+                self._trigger_stale_code_restart()
+                # Acknowledge to the user so they don't see a silent
+                # drop; the gateway will be back up in a moment via the
+                # service manager / profile-watcher respawn.
+                return (
+                    "⟳ Gateway code was updated in the background — "
+                    "restarting this gateway so your next message runs "
+                    "on the new code. Please retry in a moment."
+                )
+        except Exception as _stale_exc:
+            logger.debug("Stale-code self-check failed: %s", _stale_exc)
+
         # Internal events (e.g. background-process completion notifications)
         # are system-generated and must skip user authorization.
         is_internal = bool(getattr(event, "internal", False))
@@ -6020,6 +6160,16 @@ class GatewayRunner:
 
         # Load conversation history from transcript
         history = self.session_store.load_transcript(session_entry.session_id)
+        try:
+            from gateway.conversation_ledger import merge_ledger_into_history
+
+            history = merge_ledger_into_history(
+                history,
+                source=source,
+                session_id=session_entry.session_id,
+            )
+        except Exception as _ledger_exc:
+            logger.debug("Conversation ledger history merge failed: %s", _ledger_exc)
         
         # -----------------------------------------------------------------
         # Session hygiene: auto-compress pathologically large transcripts
@@ -6392,6 +6542,19 @@ class GatewayRunner:
         )
         if message_text is None:
             return
+        try:
+            from gateway.conversation_ledger import write_event_from_source
+
+            write_event_from_source(
+                source=source,
+                session_id=session_entry.session_id,
+                role="user",
+                source_label=f"{_platform_name}_inbound",
+                content=message_text,
+                message_id=getattr(event, "message_id", None),
+            )
+        except Exception as _ledger_exc:
+            logger.debug("Conversation ledger inbound write failed: %s", _ledger_exc)
 
         # Bind this gateway run generation to the adapter's active-session
         # event so deferred post-delivery callbacks can be released by the
@@ -6754,6 +6917,19 @@ class GatewayRunner:
                         await self._deliver_media_from_response(
                             response, event, _media_adapter,
                         )
+                    try:
+                        from gateway.conversation_ledger import write_event_from_source
+
+                        write_event_from_source(
+                            source=source,
+                            session_id=session_entry.session_id,
+                            role="assistant",
+                            source_label=f"{_platform_name}_streamed_reply",
+                            content=response,
+                            content_kind="text",
+                        )
+                    except Exception as _ledger_exc:
+                        logger.debug("Conversation ledger streamed outbound write failed: %s", _ledger_exc)
                 # Streaming already delivered the body text, but the footer was
                 # intentionally held back (see the `not already_sent` gate above).
                 # Send it now as a small trailing message so Telegram/Discord/etc.
@@ -8665,6 +8841,33 @@ class GatewayRunner:
 
         return True
 
+    @staticmethod
+    def _strip_media_references_for_tts(text: str) -> str:
+        """Remove image/file delivery markup before automatic TTS."""
+        cleaned = text or ""
+        cleaned = re.sub(r"!\[[^\]]*\]\([^)]+\)", "图片已生成。", cleaned)
+        cleaned = cleaned.replace("[[audio_as_voice]]", "")
+        cleaned = re.sub(r"(?im)^\s*MEDIA:\s*\S+\s*$", "", cleaned)
+        media_exts = (
+            "png", "jpg", "jpeg", "webp", "gif", "bmp",
+            "mp3", "wav", "ogg", "opus", "m4a", "flac",
+        )
+        ext_group = "|".join(media_exts)
+        cleaned = re.sub(
+            rf"(?:file://)?(?:~?/|[A-Za-z]:[\\/])\S+\.({ext_group})\b",
+            "",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+        cleaned = re.sub(
+            rf"\b[\w.-]+\.(?:{ext_group})\b",
+            "",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+        cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+        return cleaned.strip()
+
     async def _send_voice_reply(self, event: MessageEvent, text: str) -> None:
         """Generate TTS audio and send as a voice message before the text reply."""
         import uuid as _uuid
@@ -8673,7 +8876,9 @@ class GatewayRunner:
         try:
             from tools.tts_tool import text_to_speech_tool, _strip_markdown_for_tts
 
-            tts_text = _strip_markdown_for_tts(text[:4000])
+            tts_source = self._strip_media_references_for_tts(text)
+            tts_text = _strip_markdown_for_tts(tts_source[:4000])
+            tts_text = self._strip_media_references_for_tts(tts_text)
             if not tts_text:
                 return
 
@@ -13711,6 +13916,14 @@ class GatewayRunner:
                 # runner instance don't re-attach stale images.
                 _native_imgs = self._consume_pending_native_image_paths(session_key)
                 if _native_imgs:
+                    _source_paths_note = "\n".join(
+                        f"- {p}" for p in _native_imgs
+                    )
+                    message = (
+                        f"{message}\n\n"
+                        "[Image source paths for image editing tools]\n"
+                        f"{_source_paths_note}"
+                    )
                     try:
                         from agent.image_routing import build_native_content_parts
                         _parts, _skipped = build_native_content_parts(

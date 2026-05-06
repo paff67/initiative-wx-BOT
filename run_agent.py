@@ -135,7 +135,7 @@ from agent.prompt_builder import (
     DEFAULT_AGENT_IDENTITY, PLATFORM_HINTS,
     MEMORY_GUIDANCE, SESSION_SEARCH_GUIDANCE, SKILLS_GUIDANCE,
     HERMES_AGENT_HELP_GUIDANCE,
-    KANBAN_GUIDANCE,
+    KANBAN_GUIDANCE, IMAGE_DELIVERY_CONTRACT,
     build_nous_subscription_prompt,
 )
 from agent.model_metadata import (
@@ -4948,6 +4948,8 @@ class AIAgent:
             tool_guidance.append(SESSION_SEARCH_GUIDANCE)
         if "skill_manage" in self.valid_tool_names:
             tool_guidance.append(SKILLS_GUIDANCE)
+        if "image_generate" in self.valid_tool_names:
+            tool_guidance.append(IMAGE_DELIVERY_CONTRACT)
         # Kanban worker/orchestrator lifecycle — only present when the
         # dispatcher spawned this process (kanban_show check_fn gates on
         # HERMES_KANBAN_TASK env var). Normal chat sessions never see
@@ -8996,6 +8998,13 @@ class AIAgent:
     def _copy_reasoning_content_for_api(self, source_msg: dict, api_msg: dict) -> None:
         """Copy provider-facing reasoning fields onto an API replay message."""
         if source_msg.get("role") != "assistant":
+            return
+            # api.0-0.pro routes OpenAI-compatible requests to strict upstreams.
+            # They reject reasoning_content as an input field, even though Hermes may
+            # store it internally after high/xhigh reasoning turns.
+        if self.provider == "custom" and base_url_host_matches(self._base_url_lower, "api.0-0.pro"):
+            api_msg.pop("reasoning_content", None)
+            api_msg.pop("reasoning_details", None)
             return
 
         # 1. Explicit reasoning_content already set — preserve it verbatim

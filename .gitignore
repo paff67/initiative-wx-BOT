@@ -2,6 +2,7 @@
 /venv/
 /_pycache/
 *.pyc*
+*.bak.*
 __pycache__/
 .venv/
 .vscode/

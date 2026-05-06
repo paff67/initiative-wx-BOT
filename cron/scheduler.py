@@ -410,6 +410,43 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
     from gateway.platforms.base import BasePlatformAdapter
     media_files, cleaned_delivery_content = BasePlatformAdapter.extract_media(delivery_content)
 
+    def _ledger_payload() -> tuple[str, str]:
+        text = cleaned_delivery_content.strip()
+        if text:
+            return text, "text"
+        if media_files:
+            first = Path(media_files[0][0]).name
+            return f"[附件] {first}", "audio_attachment" if str(first).lower().endswith((".mp3", ".wav", ".m4a", ".ogg", ".opus", ".flac")) else "file_attachment"
+        return "", "text"
+
+    def _write_delivery_ledger(platform_name: str, chat_id: str, thread_id: str | None, message_id: str | None = None) -> None:
+        content_for_ledger, content_kind = _ledger_payload()
+        if not content_for_ledger:
+            return
+        job_name = str(job.get("name") or "")
+        job_id = str(job.get("id") or "")
+        source_label = "presence" if job_id.startswith("presence") or "presence" in job_name else "cron_delivery"
+        try:
+            from gateway.conversation_ledger import write_delivery_event
+
+            write_delivery_event(
+                platform=platform_name,
+                chat_id=str(chat_id),
+                thread_id=str(thread_id or "") or None,
+                content=content_for_ledger,
+                source_label=source_label,
+                content_kind=content_kind,
+                delivery={
+                    "job_id": job_id,
+                    "job_name": job_name,
+                    "delivery_channel": platform_name,
+                    "message_id": message_id or "",
+                },
+                presence={"job_id": job_id, "job_name": job_name} if source_label == "presence" else None,
+            )
+        except Exception as exc:
+            logger.debug("Job '%s': conversation ledger delivery write failed: %s", job.get("id", "?"), exc)
+
     try:
         config = load_gateway_config()
     except Exception as e:
@@ -498,6 +535,7 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
 
                 if adapter_ok:
                     logger.info("Job '%s': delivered to %s:%s via live adapter", job["id"], platform_name, chat_id)
+                    _write_delivery_ledger(platform_name, chat_id, thread_id)
                     delivered = True
             except Exception as e:
                 logger.warning(
@@ -532,6 +570,12 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
                 continue
 
             logger.info("Job '%s': delivered to %s:%s", job["id"], platform_name, chat_id)
+            _write_delivery_ledger(
+                platform_name,
+                chat_id,
+                thread_id,
+                message_id=str(result.get("message_id") or "") if isinstance(result, dict) else None,
+            )
 
     if delivery_errors:
         return "; ".join(delivery_errors)

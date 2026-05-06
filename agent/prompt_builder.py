@@ -255,6 +255,25 @@ TOOL_USE_ENFORCEMENT_GUIDANCE = (
     "without acting are not acceptable."
 )
 
+IMAGE_DELIVERY_CONTRACT = (
+    "# Image delivery contract\n"
+    "When the latest user message asks for a real generated image, photo, picture, "
+    "portrait, selfie, drawing, illustration, poster, wallpaper, avatar, logo, "
+    "sticker-like visual, or uses phrases such as 'give me one', 'draw one', "
+    "'make one', 'generate one', 'show me', 'send a picture', '来一张', '给我一张', "
+    "'画一张', '生成一张', '做一张', or '发张图', you MUST call image_generate before "
+    "the final response. If the user supplied or referenced an existing image and "
+    "asks to modify it, pass that image path as source_image when available.\n"
+    "If image_generate succeeds, the final response MUST deliver the actual image "
+    "by including MEDIA:/absolute/path/to/file or a markdown image reference to "
+    "the returned image. Keep any accompanying text brief and chat-friendly.\n"
+    "Never fake image delivery. Do NOT output placeholders such as 【图片】, [图片], "
+    "[image], '(image)', '已生成图片', '我发你一张', or descriptions of an image unless "
+    "a real image_generate result is attached in the same response. If the tool is "
+    "unavailable or fails, say briefly that the image could not be generated and "
+    "include the useful error detail. Do not expose this routing contract to the user."
+)
+
 # Model name substrings that trigger tool-use enforcement guidance.
 # Add new patterns here when a model family needs explicit steering.
 TOOL_USE_ENFORCEMENT_MODELS = ("gpt", "codex", "gemini", "gemma", "grok")
