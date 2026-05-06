@@ -436,11 +436,14 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
                 content=content_for_ledger,
                 source_label=source_label,
                 content_kind=content_kind,
+                message_id=message_id,
                 delivery={
                     "job_id": job_id,
                     "job_name": job_name,
                     "delivery_channel": platform_name,
                     "message_id": message_id or "",
+                    "status": "sent",
+                    "ledger_write_order": "after_successful_delivery",
                 },
                 presence={"job_id": job_id, "job_name": job_name} if source_label == "presence" else None,
             )

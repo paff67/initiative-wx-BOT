@@ -12,6 +12,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from presence_common import HERMES_HOME, load_env_file, local_now, read_json, read_yaml, redact, runtime_path, sha256_text, write_json
+from presence_location import resolve_location_templates
 
 
 def collect_mcp_sources(
@@ -58,13 +59,17 @@ def _call_source(
 ) -> dict[str, Any]:
     server_name = str(source.get("server") or "").strip()
     tool_name = str(source.get("tool") or "").strip()
-    args = source.get("arguments") if isinstance(source.get("arguments"), dict) else {}
+    args_template = source.get("arguments") if isinstance(source.get("arguments"), dict) else {}
+    args, location_context = resolve_location_templates(args_template, profile)
+    args = args if isinstance(args, dict) else {}
     tool_call_id = f"mcp_{_slug(server_name)}_{_slug(tool_name)}_{sha256_text(json.dumps(args, ensure_ascii=False, sort_keys=True))[:8]}"
     base = {
         "tool_call_id": tool_call_id,
         "server": server_name,
         "tool": tool_name,
         "args_summary": _compact_json(args, 500),
+        "args_template_summary": _compact_json(args_template, 500) if args_template != args else "",
+        "location_context": location_context,
         "sensitivity": source.get("sensitivity", "public"),
         "policy_decision": source.get("policy_decision", "auto_allow"),
         "allowed_use": source.get("allowed_use", "mood_only"),
@@ -187,7 +192,12 @@ def _signal_from_call(
         "policy_decision": source.get("policy_decision", "auto_allow"),
         "allowed_use": source.get("allowed_use", "mood_only"),
         "operator_review": "unreviewed",
-        "trace": {"collector_run_id": collector_run_id, "tick_run_id": tick_run_id, "tool_calls": [call.get("tool_call_id")]},
+        "trace": {
+            "collector_run_id": collector_run_id,
+            "tick_run_id": tick_run_id,
+            "tool_calls": [call.get("tool_call_id")],
+            "location_context": call.get("location_context"),
+        },
     }
 
 

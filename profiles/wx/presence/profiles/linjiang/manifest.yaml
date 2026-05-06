@@ -6,6 +6,7 @@ locale: zh-CN
 timezone: Asia/Shanghai
 persona_files:
   soul: ../../../SOUL.md
+  profile_metadata: profile_metadata.yaml
   voice: voice.md
   relationship: relationship.yaml
   proactive_policy: proactive_policy.yaml

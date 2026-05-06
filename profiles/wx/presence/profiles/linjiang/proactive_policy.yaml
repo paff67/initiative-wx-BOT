@@ -2,14 +2,14 @@ cadence:
   schedule: "every 15m"
   stochastic_prefilter:
     enabled: true
-    base_wake_probability: 0.22
-    min_probability: 0.04
-    max_probability: 0.65
+    base_wake_probability: 0.5
+    min_probability: 0.35
+    max_probability: 0.85
     skip_before_llm: true
     jitter_not_before_minutes:
       min: 12
       max: 45
-    force_llm_after_state_age_minutes: 180
+    force_llm_after_state_age_minutes: 60
 decision:
   min_send_confidence: 0.55
   allow_hesitate: true
@@ -19,9 +19,9 @@ intent_accumulator:
   enabled: true
   score_min: 0
   score_max: 3
-  send_pressure_threshold: 2.0
-  hourly_decay: 0.2
-  hesitate_delta_default: 0.7
+  send_pressure_threshold: 1.1
+  hourly_decay: 0.08
+  hesitate_delta_default: 0.9
   silent_with_open_loop_delta: 0.2
   world_signal_delta_max: 0.5
   expire_after_hours: 12
@@ -29,12 +29,12 @@ intent_accumulator:
 cooldowns:
   by_message_class:
     micro_send:
-      min_gap_minutes: 30
-      daily_cap: 2
+      min_gap_minutes: 15
+      daily_cap: 6
       counts_toward_normal_send: false
     closure:
-      min_gap_minutes: 60
-      daily_cap: 2
+      min_gap_minutes: 30
+      daily_cap: 4
       counts_toward_normal_send: false
     random_share:
       min_gap_minutes: 120
@@ -45,8 +45,8 @@ cooldowns:
       daily_cap: 2
       counts_toward_normal_send: true
     normal_send:
-      min_gap_minutes: 180
-      daily_cap: 3
+      min_gap_minutes: 120
+      daily_cap: 5
       counts_toward_normal_send: true
     media:
       min_gap_minutes: 180

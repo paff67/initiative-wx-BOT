@@ -20,6 +20,7 @@ import yaml
 HERMES_HOME = Path(os.environ.get("HERMES_HOME", str(Path.home() / ".hermes" / "profiles" / "wx"))).expanduser()
 PRESENCE_HOME = HERMES_HOME / "presence"
 KERNEL_DIR = PRESENCE_HOME / "kernel"
+PROMPTS_DIR = PRESENCE_HOME / "prompts"
 PROFILES_DIR = PRESENCE_HOME / "profiles"
 RUNTIME_DIR = PRESENCE_HOME / "runtime"
 EVENTS_DIR = PRESENCE_HOME / "events"
@@ -27,7 +28,7 @@ SCHEMAS_DIR = PRESENCE_HOME / "schemas"
 
 
 def ensure_dirs() -> None:
-    for path in (PRESENCE_HOME, KERNEL_DIR, PROFILES_DIR, RUNTIME_DIR, EVENTS_DIR, SCHEMAS_DIR):
+    for path in (PRESENCE_HOME, KERNEL_DIR, PROMPTS_DIR, PROFILES_DIR, RUNTIME_DIR, EVENTS_DIR, SCHEMAS_DIR):
         path.mkdir(parents=True, exist_ok=True)
 
 
@@ -100,7 +101,8 @@ def load_profile(profile_id: str) -> dict[str, Any]:
         "profile_id": profile_id,
         "profile_dir": str(base),
         "manifest": manifest,
-        "persona": read_yaml(base / "persona.yaml", {}),
+        "profile_metadata": read_yaml(base / "profile_metadata.yaml", {}),
+        "identity_canon": soul_identity_canon(),
         "relationship": read_yaml(base / "relationship.yaml", {}),
         "proactive_policy": read_yaml(base / "proactive_policy.yaml", {}),
         "world_policy": read_yaml(base / "world_policy.yaml", {}),
@@ -119,7 +121,43 @@ def config_revision(profile: dict[str, Any]) -> str:
         k: v for k, v in profile.items()
         if k not in {"config_revision", "profile_dir"}
     }
+    payload["_prompt_files"] = prompt_revision_payload(profile)
     return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()[:16]
+
+
+def prompt_revision_payload(profile: dict[str, Any]) -> dict[str, str]:
+    profile_id = str(profile.get("profile_id") or "")
+    out: dict[str, str] = {}
+    for layer in ("state", "decision", "render"):
+        for path in prompt_candidate_paths(profile_id, layer):
+            if not path.exists():
+                continue
+            try:
+                out[str(path.relative_to(PRESENCE_HOME))] = path.read_text(encoding="utf-8")
+            except Exception:
+                continue
+    return out
+
+
+def prompt_candidate_paths(profile_id: str, layer: str) -> list[Path]:
+    layer = str(layer or "").strip().lower().replace("_", "-")
+    names = [f"{layer}-system.md", f"{layer}.md"]
+    paths: list[Path] = []
+    if profile_id:
+        profile_prompts = profile_dir(profile_id) / "prompts"
+        paths.extend(profile_prompts / name for name in names)
+    paths.extend(PROMPTS_DIR / name for name in names)
+    return paths
+
+
+def load_prompt(profile: dict[str, Any], layer: str) -> str:
+    profile_id = str(profile.get("profile_id") or "")
+    for path in prompt_candidate_paths(profile_id, layer):
+        text = read_text(path, "", limit=None).strip()
+        if text:
+            return text
+    searched = ", ".join(str(path) for path in prompt_candidate_paths(profile_id, layer))
+    raise FileNotFoundError(f"Presence prompt not found for layer={layer!r}; searched: {searched}")
 
 
 def local_now(profile: dict[str, Any]) -> datetime:
@@ -139,6 +177,29 @@ def read_text(path: Path, default: str = "", limit: int | None = None) -> str:
         return text
     except Exception:
         return default
+
+
+def soul_identity_canon(limit: int | None = 12000) -> str:
+    """Return the canonical identity block from SOUL.md.
+
+    Presence treats the role content before the Hermes runtime boundary / section 8
+    as the identity authority. Profile YAML may describe routing and policy, but it
+    must not override this canon.
+    """
+    text = read_text(HERMES_HOME / "SOUL.md", "", limit=None)
+    if not text:
+        return ""
+    stops = []
+    for marker in ("\n## Hermes 微信运行边界", "\n## 8."):
+        idx = text.find(marker)
+        if idx >= 0:
+            stops.append(idx)
+    if stops:
+        text = text[: min(stops)]
+    text = text.rstrip()
+    if limit and len(text) > limit:
+        return text[:limit] + "\n...[truncated]"
+    return text
 
 
 def load_env_file(path: Path) -> None:

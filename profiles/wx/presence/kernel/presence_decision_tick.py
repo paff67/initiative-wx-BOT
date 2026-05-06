@@ -5,57 +5,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from presence_common import append_jsonl, call_chat_completion, event, event_path, model_settings, parse_jsonish
+from presence_common import append_jsonl, call_chat_completion, event, event_path, load_prompt, model_settings, parse_jsonish
 
-
-DECISION_SYSTEM_PROMPT = """# 核心指令
-你是一个高级虚拟生命内核的「动作裁决引擎（Decision Layer）」。
-你的任务是：基于前置层算出的【内部状态 (State)】和【意图累积器 (Intent Pressure)】，决定该角色此刻对外部世界采取的动作。
-
-# 上下文输入 (Context)
-- [Profile/Persona]: {{persona_config}}
-- [Current State]: {{current_state}} (包含刚刚推演出的空白期事件 private_continuity_events 和收口状态)
-- [Intent Pressure]: {{intent_pressure}} (当前正在盘旋的话题及其张力分数)
-
-# 决策物理学 (Decision Physics)
-最高准则：【宁可错失，绝不越界。保留人性的克制与非理性】。
-你必须做出动作裁决 `action`：
-- `silent` (沉默)：如果上一段对话已经 `had_natural_closure`，且当前无极端的环境刺激或内部张力，默认保持静默。
-- `hesitate` (犹豫)：角色心里有话想说（触发了某个 open_loop 或 world_signal），但因为性格自持或怕打扰对方咽了回去。必须输出 `intent_delta` 增加张力。
-- `send` (发送)：话题张力已破阈值；或者上一段对话未收口需要 `closure`；或者受到突发世界信号刺激决定 `random_share`。
-
-# 消息形态与语音通道 (Message Class & Voice)
-如果 action 为 `send`：
-1. 决定 `message_class`（如 `micro_send`, `closure`, `random_share` 等）。
-2. 评估 `voice_design`：当前系统支持通过 MP3 附件发送语音。如果角色当前情绪处于极端的“松弛、疲惫、呢喃”状态，或者适合用极低压的语音便签传递气口，可将 `enabled` 设为 `true`，并填写音色标签。普通日常分享保持 `false`。
-3. `voice_design.natural_language_control` 必须按本次状态、消息形态和气口动态生成；Profile 中的音色描述只是人设基准参考，不要机械复制固定句子。
-
-# 输出约束 (Output Format)
-仅输出 JSON：
-{
-  "action": "silent|hesitate|send",
-  "message_class": "none|micro_send|closure|random_share|care_timing|normal_send",
-  "confidence": 0.0,
-  "reply_pressure": "none|low|medium|high",
-  "reasoning_summary": "一句话说明动作依据：重点结合空白期事件(continuity_events)和上一轮是否收口",
-  "intent_delta": {
-    "topic_key": "话题简写",
-    "delta": 0.0,
-    "reason": "为什么增加/减少张力"
-  },
-  "render_brief": {
-    "entry_point": "若send，提供给Render层的切入点（可引用空白期发生的 private_continuity_events）",
-    "emotional_baseline": "若send，说明情绪底色",
-    "shape_constraint": "若send，说明句式限制（如：极短词组，不带疑问句）"
-  },
-  "voice_design": {
-    "enabled": true/false,
-    "natural_language_control": "MiMo V2.5 提示语，如：年轻女性，音色清冷、轻微疲惫，语速偏慢，不夸张表演",
-    "assistant_style_tags": ["清冷", "轻声", "呢喃"],
-    "delivery_mode": "voice_note_candidate"
-  }
-}
-"""
 
 
 def run_decision_layer(
@@ -70,7 +21,8 @@ def run_decision_layer(
     context = {
         "persona_config": {
             "manifest": profile.get("manifest", {}),
-            "persona": profile.get("persona", {}),
+            "profile_metadata": profile.get("profile_metadata", {}),
+            "identity_canon": profile.get("identity_canon", ""),
             "relationship": profile.get("relationship", {}),
             "proactive_policy": profile.get("proactive_policy", {}),
             "permission_policy": profile.get("permission_policy", {}),
@@ -81,7 +33,9 @@ def run_decision_layer(
         "current_state": state,
         "intent_pressure": intent_summary,
     }
+    system_prompt = load_prompt(profile, "decision")
     settings = model_settings("decision", profile)
+    user_prompt = json.dumps(context, ensure_ascii=False)
     content, latency_ms = call_chat_completion(
         base_url=settings["base_url"],
         api_key=settings["api_key"],
@@ -90,8 +44,8 @@ def run_decision_layer(
         max_tokens=settings["max_tokens"],
         timeout=settings["timeout"],
         messages=[
-            {"role": "system", "content": DECISION_SYSTEM_PROMPT},
-            {"role": "user", "content": json.dumps(context, ensure_ascii=False)},
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
         ],
     )
     decision = parse_jsonish(content, {})
@@ -106,7 +60,27 @@ def run_decision_layer(
         "intent_topic_keys": [t.get("topic_key") for t in intent_summary.get("topics", [])],
     }
     decision["_llm"] = {"model": settings["model"], "latency_ms": latency_ms}
-    append_jsonl(event_path("decision-events.jsonl"), event({"decision_run_id": decision_run_id, "tick_run_id": tick_run_id, "dry_run": dry_run, "decision": decision}, profile, decision_run_id))
+    append_jsonl(
+        event_path("decision-events.jsonl"),
+        event(
+            {
+                "decision_run_id": decision_run_id,
+                "tick_run_id": tick_run_id,
+                "dry_run": dry_run,
+                "prompt": {
+                    "system": system_prompt,
+                    "user": user_prompt,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                },
+                "decision": decision,
+            },
+            profile,
+            decision_run_id,
+        ),
+    )
     return decision
 
 

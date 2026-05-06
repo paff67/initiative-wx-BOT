@@ -4776,27 +4776,6 @@ class GatewayRunner:
         """
         source = event.source
 
-        # Stale-code self-check (Issue #17648).  A gateway that survives
-        # ``hermes update`` keeps old modules cached in sys.modules; the
-        # first inbound message is our earliest safe chance to detect
-        # this and restart gracefully before we dispatch to the agent
-        # and hit ImportError on freshly-added names (e.g. cfg_get).
-        # Idempotent — runs the real check at most once per message, and
-        # request_restart() no-ops after the first call.
-        try:
-            if self._detect_stale_code():
-                self._trigger_stale_code_restart()
-                # Acknowledge to the user so they don't see a silent
-                # drop; the gateway will be back up in a moment via the
-                # service manager / profile-watcher respawn.
-                return (
-                    "⟳ Gateway code was updated in the background — "
-                    "restarting this gateway so your next message runs "
-                    "on the new code. Please retry in a moment."
-                )
-        except Exception as _stale_exc:
-            logger.debug("Stale-code self-check failed: %s", _stale_exc)
-
         # Internal events (e.g. background-process completion notifications)
         # are system-generated and must skip user authorization.
         is_internal = bool(getattr(event, "internal", False))
@@ -4885,6 +4864,52 @@ class GatewayRunner:
                     # Record rate limit so subsequent messages are silently ignored
                     self.pairing_store._record_rate_limit(platform_name, source.user_id)
             return None
+
+        # Stale-code self-check (Issue #17648).  A gateway that survives
+        # ``hermes update`` keeps old modules cached in sys.modules.  If this
+        # guard fires, first write the visible inbound text to the sanitized
+        # ledger so the retry after restart has the missing user turn in context.
+        # Idempotent — runs the real check at most once per message, and
+        # request_restart() no-ops after the first call.
+        try:
+            if self._detect_stale_code():
+                if not is_internal and not event.get_command():
+                    try:
+                        from gateway.conversation_ledger import write_event_from_source
+
+                        _pre_session_id = ""
+                        try:
+                            _pre_session_entry = self.session_store.get_or_create_session(source)
+                            _pre_session_id = getattr(_pre_session_entry, "session_id", "") or ""
+                        except Exception:
+                            _pre_session_id = ""
+                        _pre_content = (event.text or "").strip()
+                        if not _pre_content and getattr(event, "media_urls", None):
+                            _pre_content = "[media attachment]"
+                        if _pre_content:
+                            _pre_platform = source.platform.value if hasattr(source.platform, "value") else str(source.platform)
+                            write_event_from_source(
+                                source=source,
+                                session_id=_pre_session_id,
+                                role="user",
+                                source_label=f"{_pre_platform}_inbound",
+                                content=_pre_content,
+                                message_id=getattr(event, "message_id", None),
+                                delivery={"stage": "pre_stale_guard"},
+                            )
+                    except Exception as _ledger_exc:
+                        logger.debug("Conversation ledger stale-guard inbound write failed: %s", _ledger_exc)
+                self._trigger_stale_code_restart()
+                # Acknowledge to the user so they don't see a silent
+                # drop; the gateway will be back up in a moment via the
+                # service manager / profile-watcher respawn.
+                return (
+                    "⟳ Gateway code was updated in the background — "
+                    "restarting this gateway so your next message runs "
+                    "on the new code. Please retry in a moment."
+                )
+        except Exception as _stale_exc:
+            logger.debug("Stale-code self-check failed: %s", _stale_exc)
         
         # Intercept messages that are responses to a pending /update prompt.
         # The update process (detached) wrote .update_prompt.json; the watcher
@@ -6161,13 +6186,23 @@ class GatewayRunner:
         # Load conversation history from transcript
         history = self.session_store.load_transcript(session_entry.session_id)
         try:
-            from gateway.conversation_ledger import merge_ledger_into_history
+            from gateway.conversation_ledger import (
+                merge_ledger_into_history,
+                recent_ledger_system_message,
+            )
 
             history = merge_ledger_into_history(
                 history,
                 source=source,
                 session_id=session_entry.session_id,
             )
+            _ledger_system_note = recent_ledger_system_message(
+                source=source,
+                session_id=session_entry.session_id,
+                limit=12,
+            )
+            if _ledger_system_note:
+                context_prompt += "\n\n" + _ledger_system_note
         except Exception as _ledger_exc:
             logger.debug("Conversation ledger history merge failed: %s", _ledger_exc)
         

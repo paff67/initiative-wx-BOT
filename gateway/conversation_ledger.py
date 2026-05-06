@@ -27,6 +27,8 @@ SCHEMA_VERSION = 1
 RECENT_WINDOW_SECONDS = 4.0
 DEFAULT_PROFILE_ID = "linjiang"
 MAX_CONTENT_CHARS = 2000
+MEMORY_CONTEXT_REPLY_PREFIX = "🧠 Memory context:"
+MEMORY_CONTEXT_BLOCK_RE = re.compile(r"(?is)<memory-context\b[^>]*>.*?</memory-context>")
 
 
 def ledger_dir() -> Path:
@@ -65,7 +67,7 @@ def profile_revision(profile_id: Optional[str] = None) -> str:
         home / "USER.md",
         home / "MEMORY.md",
         home / "presence" / "profiles" / profile_id / "manifest.yaml",
-        home / "presence" / "profiles" / profile_id / "persona.yaml",
+        home / "presence" / "profiles" / profile_id / "profile_metadata.yaml",
         home / "presence" / "profiles" / profile_id / "voice.md",
         home / "presence" / "profiles" / profile_id / "relationship.yaml",
     ):
@@ -82,6 +84,29 @@ def preset_id() -> str:
     return os.environ.get("WX_ST_PRESET_ID") or os.environ.get("ST_PRESET_ID") or "default"
 
 
+def _profile_env_value(name: str) -> str:
+    """Read a value from the active profile .env without leaking global state.
+
+    Gateway processes may inherit ~/.hermes/.env while the active profile has
+    its own ~/.hermes/profiles/<id>/.env.  For the conversation ledger, the
+    profile-local value is the stable identity for this profile's timeline.
+    """
+    path = get_hermes_home() / ".env"
+    if not path.exists():
+        return ""
+    try:
+        for raw_line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            if key.strip() == name:
+                return value.strip().strip('"').strip("'")
+    except Exception:
+        return ""
+    return ""
+
+
 def conversation_key_from_parts(
     *,
     platform: str,
@@ -91,10 +116,35 @@ def conversation_key_from_parts(
 ) -> str:
     platform = str(platform or "unknown").lower()
     if platform == "weixin":
-        account_id = account_id or os.environ.get("WEIXIN_ACCOUNT_ID") or "main"
+        account_id = (
+            account_id
+            or _profile_env_value("WEIXIN_ACCOUNT_ID")
+            or os.environ.get("WEIXIN_ACCOUNT_ID")
+            or "main"
+        )
     else:
         account_id = account_id or "main"
     return f"{platform}:{account_id}:{chat_id}:{thread_id or ''}"
+
+
+def _conversation_key_matches(event: dict[str, Any], conversation_key: str) -> bool:
+    """Match exact keys, with a Weixin fallback for legacy mixed account IDs."""
+    event_key = str(event.get("conversation_key") or "")
+    if event_key == conversation_key:
+        return True
+
+    try:
+        platform, _account, chat_id, thread_id = conversation_key.split(":", 3)
+        event_platform, _event_account, event_chat_id, event_thread_id = event_key.split(":", 3)
+    except ValueError:
+        return False
+
+    return (
+        platform == "weixin"
+        and event_platform == "weixin"
+        and event_chat_id == chat_id
+        and event_thread_id == thread_id
+    )
 
 
 def conversation_key_from_source(source: Any) -> str:
@@ -194,6 +244,7 @@ def write_delivery_event(
     user_id: str | None = None,
     session_id: str | None = None,
     content_kind: str = "text",
+    message_id: str | None = None,
     delivery: dict[str, Any] | None = None,
     presence: dict[str, Any] | None = None,
 ) -> str:
@@ -209,6 +260,7 @@ def write_delivery_event(
         source_label=source_label,
         content=content,
         content_kind=content_kind,
+        message_id=message_id,
         delivery=delivery,
         presence=presence,
     )
@@ -235,6 +287,22 @@ def write_visible_event(
         return ""
     profile_id = profile_id or default_profile_id()
     now = datetime.now().astimezone()
+    role_norm = "assistant" if str(role).lower() == "assistant" else "user"
+    conversation_key = conversation_key_from_parts(
+        platform=str(platform or ""),
+        chat_id=str(chat_id or ""),
+        thread_id=str(thread_id or "") or None,
+    )
+    duplicate_id = _find_duplicate_visible_event(
+        conversation_key=conversation_key,
+        role=role_norm,
+        source_label=str(source_label or "unknown"),
+        content=clean,
+        message_id=message_id,
+        now_ts=now.timestamp(),
+    )
+    if duplicate_id:
+        return duplicate_id
     event_id = f"conv_{now.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
     event = {
         "schema_version": SCHEMA_VERSION,
@@ -245,15 +313,11 @@ def write_visible_event(
         "thread_id": str(thread_id or ""),
         "user_id": str(user_id or ""),
         "session_id": str(session_id or ""),
-        "conversation_key": conversation_key_from_parts(
-            platform=str(platform or ""),
-            chat_id=str(chat_id or ""),
-            thread_id=str(thread_id or "") or None,
-        ),
+        "conversation_key": conversation_key,
         "session_epoch_id": str(session_id or ""),
         "persona_revision": profile_revision(profile_id),
         "preset_id": preset_id(),
-        "role": "assistant" if str(role).lower() == "assistant" else "user",
+        "role": role_norm,
         "source": str(source_label or "unknown"),
         "content": clean[:MAX_CONTENT_CHARS],
         "content_kind": content_kind,
@@ -312,7 +376,7 @@ def read_visible_events(
                     continue
                 if event.get("profile_id") != profile_id:
                     continue
-                if event.get("conversation_key") != conversation_key:
+                if not _conversation_key_matches(event, conversation_key):
                     continue
                 if session_epoch_id and event.get("session_epoch_id") != session_epoch_id:
                     # Presence cron delivery may happen outside an ordinary
@@ -346,9 +410,12 @@ def merge_ledger_into_history(
         return history
     out = list(history or [])
     for event in events:
+        content = sanitize_content(str(event.get("content") or ""))
+        if not content:
+            continue
         msg = {
             "role": "assistant" if event.get("role") == "assistant" else "user",
-            "content": event.get("content", ""),
+            "content": content,
             "timestamp": event.get("created_at"),
             "ledger_event_id": event.get("event_id"),
             "ledger_source": event.get("source"),
@@ -359,13 +426,130 @@ def merge_ledger_into_history(
     return out
 
 
+def recent_ledger_system_message(
+    *,
+    source: Any,
+    session_id: str,
+    profile_id: str | None = None,
+    limit: int = 12,
+) -> str:
+    """Build a compact system note from the recent user-visible ledger.
+
+    This is intentionally redundant with ``merge_ledger_into_history``: the
+    history merge keeps role continuity, while this note gives models with
+    aggressive history truncation an unmistakable bridge across ordinary chat
+    and Presence cron deliveries.
+    """
+    events = read_visible_events_for_source(
+        source=source,
+        session_id=session_id,
+        profile_id=profile_id or default_profile_id(),
+        limit=limit,
+    )
+    if not events:
+        return ""
+    lines = [
+        "[Recent visible conversation ledger]",
+        "These are only user-visible chat events. They exclude cron prompts, scripts, traces, tool logs, and internal notices.",
+    ]
+    for event in events[-limit:]:
+        role = "assistant" if event.get("role") == "assistant" else "user"
+        src = str(event.get("source") or "").strip()
+        label = role
+        if role == "assistant" and src == "presence":
+            label = f"assistant({src})"
+        created = _format_time_for_ledger_note(event.get("created_at"), event.get("unix_ts"))
+        content = sanitize_content(str(event.get("content") or "")).replace("\n", " ").strip()
+        if len(content) > 360:
+            content = content[:357] + "..."
+        if content:
+            lines.append(f"{created} {label}: {content}")
+    return "\n".join(lines) if len(lines) > 2 else ""
+
+
 def sanitize_content(content: str) -> str:
     text = str(content or "").strip()
+    text = MEMORY_CONTEXT_BLOCK_RE.sub("", text).strip()
+    if re.match(r"(?i)^presence\s+location(?:\s+|$)", text):
+        return ""
+    if re.match(r"(?i)^proxy\s+memory(?:-context|\s+context|\s+show|\s+clear)?(?:\s+|$)", text):
+        return ""
+    if text.startswith("📍 Presence location:"):
+        return ""
+    if text.startswith(MEMORY_CONTEXT_REPLY_PREFIX):
+        return ""
     text = re.sub(r"MEDIA:\s*\S+", "", text)
     text = text.replace("[[audio_as_voice]]", "").strip()
+    text = re.sub(r"<\|[^>]{1,80}\|>", "", text).strip()
+    text = text.replace("</null>", "").strip()
     text = re.sub(r"(?i)(api[_-]?key|token|secret|password)=\S+", r"\1=***", text)
     text = re.sub(r"(?i)bearer\s+[A-Za-z0-9._-]+", "Bearer ***", text)
+    if re.match(
+        r"^(Operation interrupted|Interrupting current task|Gateway code was updated|⟳ Gateway code was updated|◐ Session automatically reset)\b",
+        text,
+        flags=re.IGNORECASE,
+    ):
+        return ""
     return text
+
+
+def _find_duplicate_visible_event(
+    *,
+    conversation_key: str,
+    role: str,
+    source_label: str,
+    content: str,
+    message_id: str | None,
+    now_ts: float,
+) -> str:
+    path = ledger_path()
+    if not path.exists():
+        return ""
+    clean = sanitize_content(content)
+    found = ""
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                try:
+                    event = json.loads(line)
+                except Exception:
+                    continue
+                if not event.get("visible_to_user"):
+                    continue
+                if not _conversation_key_matches(event, conversation_key):
+                    continue
+                if str(event.get("role") or "") != role:
+                    continue
+                if str(event.get("source") or "") != source_label:
+                    continue
+                if message_id:
+                    if str(event.get("message_id") or "") == str(message_id):
+                        found = str(event.get("event_id") or "")
+                    continue
+                if sanitize_content(str(event.get("content") or "")) != clean:
+                    continue
+                event_ts = event.get("unix_ts")
+                try:
+                    event_ts = float(event_ts)
+                except Exception:
+                    event_ts = None
+                if event_ts is None or abs(now_ts - event_ts) <= RECENT_WINDOW_SECONDS:
+                    found = str(event.get("event_id") or "")
+    except Exception as exc:
+        logger.debug("conversation ledger duplicate check failed: %s", exc)
+        return ""
+    return found
+
+
+def _format_time_for_ledger_note(created_at: Any, unix_ts: Any) -> str:
+    try:
+        if created_at:
+            dt = datetime.fromisoformat(str(created_at))
+        else:
+            dt = datetime.fromtimestamp(float(unix_ts)).astimezone()
+        return dt.strftime("%H:%M")
+    except Exception:
+        return "??:??"
 
 
 def _append_jsonl(path: Path, obj: dict[str, Any]) -> None:

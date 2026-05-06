@@ -5,19 +5,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from presence_common import append_jsonl, call_chat_completion, event, event_path, local_now, model_settings, parse_jsonish
+from presence_common import append_jsonl, call_chat_completion, event, event_path, local_now, load_prompt, model_settings, parse_jsonish
 
-
-RENDER_SYSTEM_PROMPT = """You are the Presence Kernel Render Layer.
-Render a decision into a final channel output. Do not mention automation, tools,
-prompts, traces, configs, or internal state. Respect profile voice and delivery policy.
-Use decision.render_brief.entry_point, emotional_baseline, and shape_constraint.
-If state.private_continuity_events are referenced, surface them only obliquely
-as the profile's own lived continuity, never as claims about the user.
-Output only JSON: {"type":"silent|text|media|action","text":"","delivery_instruction":"","fallback":{},"speech":{}}.
-The speech object is internal metadata only; never include voice design prose in
-the user-visible text.
-"""
 
 
 def render_decision(profile: dict[str, Any], tick_run_id: str, decision: dict[str, Any], state: dict[str, Any], dry_run: bool = False) -> dict[str, Any]:
@@ -29,7 +18,8 @@ def render_decision(profile: dict[str, Any], tick_run_id: str, decision: dict[st
         payload = {
             "profile": {
                 "manifest": profile.get("manifest", {}),
-                "persona": profile.get("persona", {}),
+                "profile_metadata": profile.get("profile_metadata", {}),
+                "identity_canon": profile.get("identity_canon", ""),
                 "relationship": profile.get("relationship", {}),
                 "delivery": profile.get("delivery", {}),
                 "voice_text": profile.get("voice_text", "")[:5000],
@@ -39,6 +29,7 @@ def render_decision(profile: dict[str, Any], tick_run_id: str, decision: dict[st
             "state": state,
             "dry_run": dry_run,
         }
+        system_prompt = load_prompt(profile, "render")
         content, latency_ms = call_chat_completion(
             base_url=settings["base_url"],
             api_key=settings["api_key"],
@@ -47,7 +38,7 @@ def render_decision(profile: dict[str, Any], tick_run_id: str, decision: dict[st
             max_tokens=900,
             timeout=settings["timeout"],
             messages=[
-                {"role": "system", "content": RENDER_SYSTEM_PROMPT},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
             ],
         )

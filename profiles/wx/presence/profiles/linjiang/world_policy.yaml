@@ -1,6 +1,15 @@
 collection:
   default_enabled: true
   prefilter_phase_must_be_non_llm: true
+location_resolution:
+  enabled: true
+  default_anchor:
+    label: Shanghai
+    country_code: CN
+    latitude: 31.2304
+    longitude: 121.4737
+    confidence: 0.7
+  render_visibility_default: oblique_only
 signals:
   time_context:
     enabled: true
@@ -28,8 +37,8 @@ mcp_sources:
     server: weather_openmeteo
     tool: get_current_weather
     arguments:
-      location: Shanghai
-      country_code: CN
+      location: ${location.label}
+      country_code: ${location.country_code}
       units: metric
     kind: weather
     sensitivity: public
@@ -46,8 +55,8 @@ mcp_sources:
     server: weather_openmeteo
     tool: get_hourly_forecast
     arguments:
-      location: Shanghai
-      country_code: CN
+      location: ${location.label}
+      country_code: ${location.country_code}
       units: metric
     kind: weather_hourly
     sensitivity: public
@@ -64,10 +73,10 @@ mcp_sources:
     server: google_maps
     tool: maps_search_places
     arguments:
-      query: bookstores cafes parks in Shanghai
+      query: bookstores cafes parks in ${location.label}
       location:
-        latitude: 31.2304
-        longitude: 121.4737
+        latitude: ${location.latitude}
+        longitude: ${location.longitude}
       radius: 5000
     kind: public_places
     sensitivity: public
